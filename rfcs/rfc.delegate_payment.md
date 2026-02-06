@@ -27,6 +27,7 @@ The key words **MUST**, **MUST NOT**, **SHOULD**, **MAY** are to be interpreted 
 ### 2.1 Initialization (MUST happen before tokenization)
 
 - **Version compatibility:** Client **MUST** send `API-Version`. Server **MUST** validate support (e.g., `2025-09-29`).
+  - When rejecting a request due to missing or unsupported `API-Version` header, servers **SHOULD** return HTTP `400 Bad Request` with a `supported_versions` array listing all versions the server accepts. Servers **MAY** use `unsupported_api_version` or `missing_api_version` as well-known `code` values.
 - **Identity proofing requirements:** Server advertises acceptable signature algorithms (e.g., Ed25519, ES256) out-of-band.
 - **Implementation details:** Client capabilities (risk signals, wallet types) **SHOULD** be documented or discoverable.
 - **Client preparation:** Canonical JSON of request; cryptographic key material for signing.
@@ -105,7 +106,7 @@ Exactly **one** credential type is supported today: **card**.
 - `name`: string
 - `cvc`: string (max 4)
 - `checks_performed`: array of `avs` | `cvv` | `ani` | `auth0`
-- `iin`: string (max 6)
+- `iin`: string (max 8)
 - `display_card_funding_type`: `credit` | `debit` | `prepaid` (**REQUIRED**)
 - `display_wallet_type`: string (e.g., wallet indicator for virtual)
 - `display_brand`: string (e.g., `visa`, `amex`)
@@ -204,7 +205,7 @@ Exactly **one** credential type is supported today: **card**.
 - **Integrity:** `Signature` over canonical JSON **SHOULD** be verified (algorithm policy advertised out-of-band).
 - **Freshness:** `Timestamp` **SHOULD** be required and checked within an acceptable clock-skew window.
 - **PII/PCI:** Card data handling **MUST** follow applicable PCI DSS requirements; logs **MUST NOT** contain full PAN or CVC.
-- **Transport:** All requests **MUST** use HTTPS/TLS 1.2+.
+- **Transport:** All requests **MUST** use HTTPS/TLS 1.3.
 
 ---
 
@@ -218,7 +219,7 @@ Exactly **one** credential type is supported today: **card**.
   - `exp_month` length ≤ 2 and value `"01"`–`"12"`.
   - `exp_year` length ≤ 4 and four digits.
   - `cvc` length ≤ 4.
-  - `iin` length ≤ 6.
+  - `iin` length ≤ 8.
 - `display_card_funding_type` ∈ `credit|debit|prepaid`.
 - `allowance.currency` matches `^[a-z]{3}$` (e.g., `usd`).
 - `allowance.expires_at` must be RFC 3339.

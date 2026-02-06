@@ -34,6 +34,7 @@ The key words **MUST**, **MUST NOT**, **SHOULD**, **MAY** follow RFC 2119/8174.
 ### 2.1 Initialization
 
 - **Versioning:** Client (ChatGPT) **MUST** send `API-Version`. Server **MUST** validate support (e.g., `2026-01-16`).
+  - When rejecting a request due to missing or unsupported `API-Version` header, servers **SHOULD** return HTTP `400 Bad Request` with a `supported_versions` array listing all versions the server accepts. Servers **MAY** use `unsupported_api_version` or `missing_api_version` as well-known `code` values.
 - **Identity/Signing:** Server **SHOULD** publish acceptable signature algorithms out‑of‑band; client **SHOULD** sign requests (`Signature`) over canonical JSON with an accompanying `Timestamp` (RFC 3339).
 - **Capabilities:** Merchant **SHOULD** document accepted payment methods (e.g., `card`) and fulfillment types (`shipping`, `digital`).
 
@@ -125,7 +126,7 @@ Where `type` ∈ `invalid_request | request_not_idempotent | processing_error | 
 **Response body (authoritative cart):**
 
 - `id` (string)
-- `payment_provider` (e.g., `stripe`, `supported_payment_methods: [{ type: "card", supported_card_networks: ["visa"] }]`)
+- `capabilities.payment.handlers` (array of **PaymentHandler** objects with handler config, PSP, and requirements)
 - `status`: `not_ready_for_payment | ready_for_payment | completed | canceled | in_progress`
 - `currency` (ISO 4217, e.g., `usd`)
 - `line_items[]` with `base_amount`, `discount`, `subtotal`, `tax`, `total` (all **integers**)
@@ -183,18 +184,23 @@ If a client calls `POST .../complete` while `session.status` is `authentication_
 - **FulfillmentOption (pickup)**: `id`, `title`, `description?`, `location`, `pickup_type?`, `ready_by?`, `pickup_by?`, `totals` (array of **Total**)
 - **FulfillmentOption (local_delivery)**: `id`, `title`, `description?`, `delivery_window?`, `service_area?`, `totals` (array of **Total**)
 - **SelectedFulfillmentOption**: `type` (`shipping|digital|pickup|local_delivery`), `option_id`, `item_ids[]` (simple object mapping fulfillment option to items)
-- **PaymentProvider**: `provider` (`stripe`), `supported_payment_methods` (array of **PaymentMethod**)
-- **PaymentMethod**: `type` (`"card"`), `supported_card_networks` (`amex | discover | mastercard | visa`)
-- **PaymentData**: `token`, `provider` (`stripe`), `billing_address?`
+- **PaymentHandler**: `id`, `name`, `version`, `spec`, `requires_delegate_payment`, `requires_pci_compliance`, `psp`, `config_schema`, `instrument_schemas[]`, `config` (handler-specific configuration)
+- **PaymentData**: `handler_id`, `instrument` (with `type` and `credential`), `billing_address?`
 - **Order**: `id`, `checkout_session_id`, `permalink_url`
-- **Message (info)**: `type: "info"`, `param?`, `content_type: "plain"|"markdown"`, `content`
-- **Message (error)**: `type: "error"`, `code` (`missing|invalid|out_of_stock|payment_declined|requires_sign_in|requires_3ds`), `param?`, `content_type`, `content`
-- **Link**: `type` (`terms_of_use|privacy_policy|return_policy|shipping_policy|contact_us|about_us|faq|support`), `url`, `title?`
+- **Message (info)**: `type: "info"`, `severity?`, `resolution?`, `param?`, `content_type: "plain"|"markdown"`, `content`
+- **Message (warning)**: `type: "warning"`, `code`, `severity?`, `resolution?`, `param?`, `content_type`, `content`
+- **Message (error)**: `type: "error"`, `code` (`missing|invalid|out_of_stock|payment_declined|requires_sign_in|requires_3ds`), `severity?`, `resolution?`, `param?`, `content_type`, `content`
+
+Message resolution values:
+- `resolution` (optional): Declares who resolves this message. Values:
+  - `recoverable`: Agent can fix via API (e.g., retry with different parameters)
+  - `requires_buyer_input`: Buyer must provide information the API cannot collect programmatically
+  - `requires_buyer_review`: Buyer must authorize before order placement (policy, regulatory, or entitlement rules)
+- **Link**: `type` (`terms_of_use|privacy_policy|return_policy`), `url`
 - **Total**: `type`, `display_text`, `amount` (**int**), `description?`
 
 3D Secure / Authentication-specific types:
-- **AuthenticationMetadata**: 
-  - `channel` (object): `type` ("browser"), `browser` (object containing `accept_header`, `ip_address`, `javascript_enabled` (bool), `language`, `user_agent`; plus conditional fields if JS enabled: `color_depth`, `java_enabled`, `screen_height`, `screen_width`, `timezone_offset`).
+- **AuthenticationMetadata**:
   - `acquirer_details` (object): `acquirer_bin`, `acquirer_country`, `acquirer_merchant_id`, `merchant_name`, `requestor_id?`.
   - `directory_server`: enum `american_express` | `mastercard` | `visa`.
   - `flow_preference?` (object): `type` ("challenge" | "frictionless"), `challenge?` (object), `frictionless?` (object).
@@ -224,7 +230,7 @@ All money fields are **integers (minor units)**.
 
 - **Authentication:** `Authorization: Bearer <token>` **REQUIRED**.
 - **Integrity & Freshness:** `Signature` over canonical JSON and `Timestamp` **SHOULD** be verified with a bounded clock‑skew window.
-- **PCI/PII:** Do not log full PAN/CVC; redact addresses as required by policy. TLS 1.2+ **MUST** be used.
+- **PCI/PII:** Do not log full PAN/CVC; redact addresses as required by policy. TLS 1.3 **MUST** be used.
 - **Webhooks:** Verify HMAC (`Merchant-Signature`) on webhook calls (see separate Webhooks RFC/OAS).
 
 ---
@@ -270,12 +276,25 @@ All money fields are **integers (minor units)**.
 ```json
 {
   "id": "checkout_session_123",
-  "payment_provider": {
-    "provider": "stripe",
-    "supported_payment_methods": [
+  "payment": {
+    "handlers": [
       {
-        "type": "card",
-        "supported_card_networks": ["amex", "discover", "mastercard", "visa"]
+        "id": "card_tokenized",
+        "name": "dev.acp.tokenized.card",
+        "version": "2026-01-22",
+        "spec": "https://acp.dev/handlers/tokenized.card",
+        "requires_delegate_payment": true,
+        "requires_pci_compliance": false,
+        "psp": "stripe",
+        "config_schema": "https://acp.dev/schemas/handlers/tokenized.card/config.json",
+        "instrument_schemas": ["https://acp.dev/schemas/handlers/tokenized.card/instrument.json"],
+        "config": {
+          "merchant_id": "acct_1234567890",
+          "psp": "stripe",
+          "accepted_brands": ["visa", "mastercard", "amex", "discover"],
+          "supports_3ds": true,
+          "environment": "production"
+        }
       }
     ]
   },
@@ -469,8 +488,14 @@ All money fields are **integers (minor units)**.
     "phone_number": "15552003434"
   },
   "payment_data": {
-    "token": "spt_123",
-    "provider": "stripe",
+    "handler_id": "card_tokenized",
+    "instrument": {
+      "type": "card",
+      "credential": {
+        "type": "spt",
+        "token": "spt_123"
+      }
+    },
     "billing_address": {
       "name": "test",
       "line_one": "1234 Chat Road",
@@ -536,7 +561,7 @@ If the session is in `authentication_required` state, a client MUST include `aut
   "selected_fulfillment_options": [
     {
       "type": "shipping",
-      "option_id": "fulfillment_option_123",
+      "option_id": "fulfillment_option_456",
       "item_ids": ["item_456"]
     }
   ],
@@ -548,8 +573,8 @@ If the session is in `authentication_required` state, a client MUST include `aut
     },
     { "type": "subtotal", "display_text": "Subtotal", "amount": 300 },
     { "type": "tax", "display_text": "Tax", "amount": 30 },
-    { "type": "fulfillment", "display_text": "Fulfillment", "amount": 100 },
-    { "type": "total", "display_text": "Total", "amount": 430 }
+    { "type": "fulfillment", "display_text": "Fulfillment", "amount": 500 },
+    { "type": "total", "display_text": "Total", "amount": 830 }
   ],
   "fulfillment_options": [
     {
@@ -631,8 +656,8 @@ If a client calls `POST /checkout_sessions/{id}/complete` while `session.status 
     },
     { "type": "subtotal", "display_text": "Subtotal", "amount": 300 },
     { "type": "tax", "display_text": "Tax", "amount": 30 },
-    { "type": "fulfillment", "display_text": "Fulfillment", "amount": 100 },
-    { "type": "total", "display_text": "Total", "amount": 430 }
+    { "type": "fulfillment", "display_text": "Fulfillment", "amount": 500 },
+    { "type": "total", "display_text": "Total", "amount": 830 }
   ],
   "messages": [
     {
@@ -670,6 +695,7 @@ If a client calls `POST /checkout_sessions/{id}/complete` while `session.status 
 
 ## 11. Change Log
 
+- **2026-02-04**: Added optional `resolution` field to Message schemas (info, warning, error) to indicate who resolves the message (`recoverable`, `requires_buyer_input`, `requires_buyer_review`). This enables agents to programmatically determine appropriate error handling strategies.
 - **2026-01-12**: Breaking changes for v2:
   - Renamed `fulfillment_address` to `fulfillment_details` with nested structure (`name`, `phone_number`, `email`, `address`)
   - Replaced `fulfillment_option_id` with `selected_fulfillment_options[]` array supporting multiple selections and item mappings
